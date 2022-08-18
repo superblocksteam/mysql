@@ -6,6 +6,7 @@ import {
   IntegrationError,
   MySQLDatasourceConfiguration,
   RawRequest,
+  ResolvedActionConfigurationProperty,
   Table,
   TableType
 } from '@superblocksteam/shared';
@@ -34,7 +35,7 @@ export default class MySQLPlugin extends BasePlugin {
     property,
     escapeStrings
   }: // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ActionConfigurationResolutionContext): Promise<string | any[]> {
+  ActionConfigurationResolutionContext): Promise<ResolvedActionConfigurationProperty> {
     return resolveActionConfigurationPropertyUtil(
       super.resolveActionConfigurationProperty,
       {
