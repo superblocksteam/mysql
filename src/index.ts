@@ -59,7 +59,7 @@ export default class MySQLPlugin extends BasePlugin {
       const query = actionConfiguration.body;
 
       const ret = new ExecutionOutput();
-      if (isEmpty(query)) {
+      if (!query || isEmpty(query)) {
         return ret;
       }
       const rows = await connection.query(query, context.preparedStatementContext);
