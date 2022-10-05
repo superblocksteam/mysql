@@ -12,10 +12,12 @@ import {
 } from '@superblocksteam/shared';
 import {
   ActionConfigurationResolutionContext,
-  BasePlugin,
+  DatabasePlugin,
   normalizeTableColumnNames,
   PluginExecutionProps,
-  resolveActionConfigurationPropertyUtil
+  resolveActionConfigurationPropertyUtil,
+  DestroyConnection,
+  CreateConnection
 } from '@superblocksteam/shared-backend';
 import { isEmpty } from 'lodash';
 // We are using the mariadb module because it has performance
@@ -25,10 +27,10 @@ import { Connection, createConnection } from 'mariadb';
 
 const TEST_CONNECTION_TIMEOUT = 5000;
 
-export default class MySQLPlugin extends BasePlugin {
+export default class MySQLPlugin extends DatabasePlugin {
   pluginName = 'MySQL';
 
-  async resolveActionConfigurationProperty({
+  public async resolveActionConfigurationProperty({
     context,
     actionConfiguration,
     files,
@@ -36,40 +38,49 @@ export default class MySQLPlugin extends BasePlugin {
     escapeStrings
   }: // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ActionConfigurationResolutionContext): Promise<ResolvedActionConfigurationProperty> {
-    return resolveActionConfigurationPropertyUtil(
-      super.resolveActionConfigurationProperty,
-      {
-        context,
-        actionConfiguration,
-        files,
-        property,
-        escapeStrings
-      },
-      false /* useOrderedParameters */
+    return this.tracer.startActiveSpan(
+      'plugin.resolveActionConfigurationProperty',
+      { attributes: this.getTraceTags(), kind: 1 /* SpanKind.SERVER */ },
+      async (span) => {
+        const resolvedProperties = resolveActionConfigurationPropertyUtil(
+          super.resolveActionConfigurationProperty,
+          {
+            context,
+            actionConfiguration,
+            files,
+            property,
+            escapeStrings
+          },
+          false /* useOrderedParameters */
+        );
+        span.end();
+        return resolvedProperties;
+      }
     );
   }
 
-  async execute({
+  public async execute({
     context,
     datasourceConfiguration,
     actionConfiguration
   }: PluginExecutionProps<MySQLDatasourceConfiguration>): Promise<ExecutionOutput> {
     const connection = await this.createConnection(datasourceConfiguration);
+    const query = actionConfiguration.body;
+    const ret = new ExecutionOutput();
+    if (!query || isEmpty(query)) {
+      return ret;
+    }
     try {
-      const query = actionConfiguration.body;
-
-      const ret = new ExecutionOutput();
-      if (!query || isEmpty(query)) {
-        return ret;
-      }
-      const rows = await connection.query(query, context.preparedStatementContext);
+      const rows = await this.executeQuery(() => {
+        return connection.query(query, context.preparedStatementContext);
+      });
       ret.output = normalizeTableColumnNames(rows);
       return ret;
     } catch (err) {
       throw new IntegrationError(`${this.pluginName} query failed, ${err.message}`);
     } finally {
       if (connection) {
-        await connection.end();
+        this.destroyConnection(connection);
       }
     }
   }
@@ -82,20 +93,20 @@ export default class MySQLPlugin extends BasePlugin {
     return ['body'];
   }
 
-  async metadata(datasourceConfiguration: MySQLDatasourceConfiguration): Promise<DatasourceMetadataDto> {
-    let connection: Connection | undefined;
+  public async metadata(datasourceConfiguration: MySQLDatasourceConfiguration): Promise<DatasourceMetadataDto> {
+    const connection = await this.createConnection(datasourceConfiguration);
+    const tableQuery =
+      'select COLUMN_NAME as name,' +
+      '       TABLE_NAME as table_name,' +
+      '       COLUMN_TYPE as column_type' +
+      ' from information_schema.columns' +
+      ' where table_schema = database()' +
+      ' order by table_name, ordinal_position';
+
     try {
-      connection = await this.createConnection(datasourceConfiguration);
-
-      const tableQuery =
-        'select COLUMN_NAME as name,' +
-        '       TABLE_NAME as table_name,' +
-        '       COLUMN_TYPE as column_type' +
-        ' from information_schema.columns' +
-        ' where table_schema = database()' +
-        ' order by table_name, ordinal_position';
-      const tableResult = await connection.query(tableQuery);
-
+      const tableResult = await this.executeQuery(() => {
+        return connection.query(tableQuery);
+      });
       const entities = tableResult.reduce((acc, attribute) => {
         const entityName = attribute.table_name;
         const entityType = TableType.TABLE;
@@ -112,7 +123,6 @@ export default class MySQLPlugin extends BasePlugin {
 
         return [...acc, table];
       }, []);
-
       return {
         dbSchema: { tables: entities }
       };
@@ -120,11 +130,17 @@ export default class MySQLPlugin extends BasePlugin {
       throw new IntegrationError(`Failed to connect to ${this.pluginName}, ${err.message}`);
     } finally {
       if (connection) {
-        await connection.end();
+        this.destroyConnection(connection);
       }
     }
   }
 
+  @DestroyConnection
+  private async destroyConnection(connection: Connection): Promise<void> {
+    await connection.end();
+  }
+
+  @CreateConnection
   private async createConnection(
     datasourceConfiguration: MySQLDatasourceConfiguration,
     connectionTimeoutMillis = 30000
@@ -155,7 +171,6 @@ export default class MySQLPlugin extends BasePlugin {
         allowPublicKeyRetrieval: !(datasourceConfiguration.connection?.useSsl ?? false)
       });
       this.attachLoggerToConnection(connection, datasourceConfiguration);
-
       this.logger.debug(
         `${this.pluginName} connection created. ${datasourceConfiguration.endpoint?.host}:${datasourceConfiguration.endpoint?.port}`
       );
@@ -181,16 +196,17 @@ export default class MySQLPlugin extends BasePlugin {
     });
   }
 
-  async test(datasourceConfiguration: MySQLDatasourceConfiguration): Promise<void> {
-    let connection: Connection | null = null;
+  public async test(datasourceConfiguration: MySQLDatasourceConfiguration): Promise<void> {
+    const connection = await this.createConnection(datasourceConfiguration, TEST_CONNECTION_TIMEOUT);
     try {
-      connection = await this.createConnection(datasourceConfiguration, TEST_CONNECTION_TIMEOUT);
-      await connection.query('SELECT NOW()');
+      await this.executeQuery(() => {
+        return connection.query('SELECT NOW()');
+      });
     } catch (err) {
       throw new IntegrationError(`Test ${this.pluginName} connection failed, ${err.message}`);
     } finally {
       if (connection) {
-        await connection.end();
+        this.destroyConnection(connection);
       }
     }
   }
