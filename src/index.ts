@@ -10,7 +10,7 @@ import {
   TableType
 } from '@superblocksteam/shared';
 import {
-  DatabasePlugin,
+  DatabasePluginPooled,
   normalizeTableColumnNames,
   PluginExecutionProps,
   DestroyConnection,
@@ -24,19 +24,14 @@ import { Connection, createConnection } from 'mariadb';
 
 const TEST_CONNECTION_TIMEOUT = 5000;
 
-export default class MySQLPlugin extends DatabasePlugin {
+export default class MySQLPlugin extends DatabasePluginPooled<Connection, MySQLDatasourceConfiguration> {
   pluginName = 'MySQL';
+  protected readonly useOrderedParameters = false;
 
-  constructor() {
-    super({ useOrderedParameters: false });
-  }
-
-  public async execute({
-    context,
-    datasourceConfiguration,
-    actionConfiguration
-  }: PluginExecutionProps<MySQLDatasourceConfiguration>): Promise<ExecutionOutput> {
-    const connection = await this.createConnection(datasourceConfiguration);
+  public async executePooled(
+    { context, actionConfiguration }: PluginExecutionProps<MySQLDatasourceConfiguration>,
+    connection: Connection
+  ): Promise<ExecutionOutput> {
     const query = actionConfiguration.body;
     const ret = new ExecutionOutput();
     if (!query || isEmpty(query)) {
@@ -50,12 +45,6 @@ export default class MySQLPlugin extends DatabasePlugin {
       return ret;
     } catch (err) {
       throw new IntegrationError(`${this.pluginName} query failed, ${err.message}`);
-    } finally {
-      if (connection) {
-        this.destroyConnection(connection).catch(() => {
-          // Error handling is done in the decorator
-        });
-      }
     }
   }
 
@@ -112,12 +101,12 @@ export default class MySQLPlugin extends DatabasePlugin {
   }
 
   @DestroyConnection
-  private async destroyConnection(connection: Connection): Promise<void> {
+  protected async destroyConnection(connection: Connection): Promise<void> {
     await connection.end();
   }
 
   @CreateConnection
-  private async createConnection(
+  protected async createConnection(
     datasourceConfiguration: MySQLDatasourceConfiguration,
     connectionTimeoutMillis = 30000
   ): Promise<Connection> {
